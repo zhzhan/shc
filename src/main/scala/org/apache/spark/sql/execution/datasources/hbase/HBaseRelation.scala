@@ -18,8 +18,8 @@
 package org.apache.spark.sql.execution.datasources.hbase
 
 import org.apache.avro.Schema
-import org.apache.hadoop.hbase.HBaseConfiguration
-import org.apache.hadoop.hbase.client.HTable
+import org.apache.hadoop.hbase.{TableName, HBaseConfiguration}
+import org.apache.hadoop.hbase.client.{ConnectionFactory, Table}
 import org.apache.hadoop.hbase.util.Bytes
 import org.apache.spark.Logging
 import org.apache.spark.rdd.RDD
@@ -55,21 +55,23 @@ case class HBaseRelation(parameters: Map[String, String])(@transient val sqlCont
     HBaseTableCatalog(parameters)
   }
   val df: DataFrame = null
-  @transient private var hTable_ : Option[HTable] = None
+  @transient private var table_ : Option[Table] = None
 
-  def hTable = {
-    hTable_.getOrElse{
-      val conf = HBaseConfiguration.create
-      val t= new HTable(conf, tableCatalog.name)
-      hTable_ = Some(t)
+  def conf = HBaseConfiguration.create
+
+  def table = {
+    table_.getOrElse{
+      val connection = ConnectionFactory.createConnection(HBaseConfiguration.create)
+      val t = connection.getTable(TableName.valueOf(tableCatalog.name))
+      table_ = Some(t)
       t
     }
   }
 
-  def closeHTable() = {
-    hTable_.map(_.close())
-    hTable_ = None
-    }
+  def closeTable() = {
+    table_.map(_.close())
+    table_ = None
+  }
 
   // Return the key that can be used as partition keys, which satisfying two conditions:
   // 1: it has to be the row key
@@ -99,31 +101,17 @@ case class HBaseRelation(parameters: Map[String, String])(@transient val sqlCont
   }
 
   @transient lazy val partitions: Seq[HBasePartition] = {
-    val regionLocations = hTable.getRegionLocations.asScala.toSeq
-    logInfo(s"Number of HBase regions for " +
-      s"table ${hTable.getName.getNameAsString}: ${regionLocations.size}")
-    regionLocations.zipWithIndex.map {
-      case p =>
-        val start: Option[HBaseRawType] = {
-          if (p._1._1.getStartKey.isEmpty) {
-            None
-          } else {
-            Some(p._1._1.getStartKey)
-          }
-        }
-        val end: Option[HBaseRawType] = {
-          if (p._1._1.getEndKey.isEmpty) {
-            None
-          } else {
-            Some(p._1._1.getEndKey)
-          }
-        }
-        new HBasePartition(
-          p._2,
-          start,
-          end,
-          Some(p._1._2.getHostname))
-    }
+
+    val connection = ConnectionFactory.createConnection(HBaseConfiguration.create)
+    val r = connection.getRegionLocator(TableName.valueOf("t1"))
+    val keys = r.getStartEndKeys
+    keys.getFirst.zip(keys.getSecond)
+      .zipWithIndex
+      .map (x =>
+        new HBasePartition(x._2,
+          Some(x._1._1),
+          Some(x._1._2),
+          Some(r.getRegionLocation(x._1._1).getHostname)))
   }
 }
 
