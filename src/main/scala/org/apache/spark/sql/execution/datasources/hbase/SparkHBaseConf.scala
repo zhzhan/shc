@@ -17,25 +17,14 @@
 
 package org.apache.spark.sql.execution.datasources.hbase
 
-import java.io.ByteArrayInputStream
+import org.apache.hadoop.conf.Configuration
 
-import org.apache.avro.Schema
-import org.apache.avro.Schema.Type._
-import org.apache.avro.generic.{GenericDatumReader, GenericDatumWriter, GenericRecord}
-import org.apache.avro.io._
-import org.apache.commons.io.output.ByteArrayOutputStream
-import org.apache.hadoop.hbase.util.Bytes
-import org.apache.spark.sql.types._
 
-trait Sedes {
-  def serialize(value: Any): Array[Byte]
-  def deserialize(bytes: Array[Byte], start: Int, end: Int): Any
+object SparkHBaseConf {
+  val testConf = "spark.hbase.connector.test"
+  var conf: Configuration = _
+  var BulkGetSize = "spark.hbase.connector.bulkGetSize"
+  var defaultBulkGetSize = 100
+  var CachingSize = "spark.hbase.connector.cacheSize"
+  var defaultCachingSize = 100
 }
-
-class DoubleSedes extends Sedes {
-  override def serialize(value: Any): Array[Byte] = Bytes.toBytes(value.asInstanceOf[Double])
-  override def deserialize(bytes: Array[Byte], start: Int, end: Int): Any = {
-    Bytes.toLong(bytes, start)
-  }
-}
-

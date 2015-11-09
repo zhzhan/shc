@@ -17,14 +17,23 @@
 
 package org.apache.spark.sql.execution.datasources.hbase
 
+import java.io.ByteArrayInputStream
+
 import org.apache.avro.Schema
-import org.apache.hadoop.hbase.{TableName, HBaseConfiguration}
-import org.apache.hadoop.hbase.client.{ConnectionFactory, Table}
+import org.apache.avro.generic.{GenericDatumWriter, GenericDatumReader, GenericRecord}
+import org.apache.avro.io._
+import org.apache.commons.io.output.ByteArrayOutputStream
+import org.apache.hadoop.hbase.io.ImmutableBytesWritable
+import org.apache.hadoop.hbase.mapred.TableOutputFormat
+import org.apache.hadoop.hbase.mapreduce.TableInputFormat
+import org.apache.hadoop.hbase.{HColumnDescriptor, HTableDescriptor, TableName, HBaseConfiguration}
+import org.apache.hadoop.hbase.client.{HBaseAdmin, Put, ConnectionFactory, Table}
 import org.apache.hadoop.hbase.util.Bytes
+import org.apache.hadoop.mapred.JobConf
 import org.apache.spark.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.{DataFrame, Row, SQLContext}
+import org.apache.spark.sql.{SaveMode, DataFrame, Row, SQLContext}
 import org.apache.spark.sql.sources._
 import org.json4s.JsonAST.JValue
 import org.json4s.jackson.JsonMethods._
@@ -32,256 +41,200 @@ import org.json4s.jackson.JsonMethods._
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 
-
-
 /**
  * val people = sqlContext.read.format("hbase").load("people")
  */
-private[sql] class DefaultSource extends RelationProvider {//with DataSourceRegister {
+private[sql] class DefaultSource extends RelationProvider with CreatableRelationProvider {//with DataSourceRegister {
 
   //override def shortName(): String = "hbase"
 
   override def createRelation(
       sqlContext: SQLContext,
       parameters: Map[String, String]): BaseRelation = {
-    HBaseRelation(parameters)(sqlContext)
+    HBaseRelation(parameters, None)(sqlContext)
+  }
+
+  override def createRelation(
+    sqlContext: SQLContext,
+    mode: SaveMode,
+    parameters: Map[String, String],
+    data: DataFrame): BaseRelation = {
+    val relation = HBaseRelation(parameters, Some(data.schema))(sqlContext)
+    relation.createTable()
+    relation.insert(data, false)
+    relation
   }
 }
 
-case class HBaseRelation(parameters: Map[String, String])(@transient val sqlContext: SQLContext)
-  extends BaseRelation with PrunedFilteredScan with Logging {
+case class HBaseRelation(
+                          parameters: Map[String, String],
+                          userSpecifiedschema: Option[StructType]
+                          )(@transient val sqlContext: SQLContext)
+  extends BaseRelation with PrunedFilteredScan with InsertableRelation with Logging {
 
-  val tableCatalog = {
-    HBaseTableCatalog(parameters)
-  }
-  val df: DataFrame = null
-  @transient private var table_ : Option[Table] = None
-
-  def conf = HBaseConfiguration.create
-
-  def table = {
-    table_.getOrElse{
-      val connection = ConnectionFactory.createConnection(HBaseConfiguration.create)
-      val t = connection.getTable(TableName.valueOf(tableCatalog.name))
-      table_ = Some(t)
-      t
+  def createTable() {
+    if (catalog.numReg > 3) {
+      val tName = TableName.valueOf(catalog.name)
+      val cfs = catalog.getColumnFamilies
+      val connection = ConnectionFactory.createConnection(hbaseConf)
+      // Initialize hBase table if necessary
+      val admin = connection.getAdmin()
+      if (!admin.isTableAvailable(tName)) {
+        val tableDesc = new HTableDescriptor(tName)
+        cfs.foreach { x =>
+         val cf = new HColumnDescriptor(x.getBytes())
+          logDebug(s"add family $x to ${catalog.name}")
+          tableDesc.addFamily(cf)
+        }
+        val startKey = Bytes.toBytes("aaaaaaa");
+        val endKey = Bytes.toBytes("zzzzzzz");
+        val splitKeys = Bytes.split(startKey, endKey, catalog.numReg - 3);
+        admin.createTable(tableDesc, splitKeys)
+        val r = connection.getRegionLocator(TableName.valueOf(catalog.name)).getAllRegionLocations
+        while(r == null || r.size() == 0) {
+          logDebug(s"region not allocated")
+          Thread.sleep(1000)
+        }
+        logDebug(s"region allocated $r")
+        admin.close()
+      }
     }
   }
 
+  /**
+   *
+   * @param data
+   * @param overwrite
+   */
+  override def insert(data: DataFrame, overwrite: Boolean): Unit = {
+    val jobConfig: JobConf = new JobConf(hbaseConf, this.getClass)
+    jobConfig.setOutputFormat(classOf[TableOutputFormat])
+    jobConfig.set(TableOutputFormat.OUTPUT_TABLE, catalog.name)
+    var count = 0
+    val rkFields = catalog.getRowKey
+    val rkIdxedFields = rkFields.map{ case x =>
+      (schema.fieldIndex(x.colName), x)
+    }
+    val colsIdxedFields = schema
+      .fieldNames
+      .partition( x => rkFields.map(_.colName).contains(x))
+      ._2.map(x => (schema.fieldIndex(x), catalog.getField(x)))
+    val rdd = data.rdd //df.queryExecution.toRdd
+    def convertToPut(row: Row) = {
+      // construct bytes for row key
+      val rowBytes = rkIdxedFields.map { case (x, y) =>
+        Utils.toBytes(row(x), y)
+      }
+      val rLen = rowBytes.foldLeft(0) { case (x, y) =>
+        x + y.length
+      }
+      val rBytes = new Array[Byte](rLen)
+      var offset = 0
+      rowBytes.foreach { x =>
+        System.arraycopy(x, 0, rBytes, offset, x.length)
+        offset += x.length
+      }
+      val put = new Put(rBytes)
+
+      colsIdxedFields.foreach { case (x, y) =>
+        val b = Utils.toBytes(row(x), y)
+        put.addColumn(Bytes.toBytes(y.cf), Bytes.toBytes(y.col), b)
+      }
+      count += 1
+      (new ImmutableBytesWritable, put)
+    }
+    rdd.map(convertToPut(_)).saveAsHadoopDataset(jobConfig)
+  }
+  val catalog = HBaseTableCatalog(parameters)
+
+  val df: DataFrame = null
+  @transient private var _table: Table = null
+
+  val testConf = sqlContext.sparkContext.conf.getBoolean(SparkHBaseConf.testConf, false)
+
+  def hbaseConf = {
+    if (testConf) {
+      SparkHBaseConf.conf
+    } else {
+      HBaseConfiguration.create
+    }
+  }
+
+  def table: Table = {
+    if (_table == null) {
+      val connection = ConnectionFactory.createConnection(hbaseConf)
+      _table = connection.getTable(TableName.valueOf(catalog.name))
+    }
+    _table
+  }
+
+  def rows = catalog.row
+
+  def singleKey = {
+    rows.fields.size == 1
+  }
   def closeTable() = {
-    table_.map(_.close())
-    table_ = None
+    if (_table != null) {
+      _table.close()
+    }
+    _table = null
+  }
+
+  def getField(name: String): Field = {
+    catalog.getField(name)
+  }
+
+  // check whether the column is the first key in the rowkey
+  def isPrimaryKey(c: String): Boolean = {
+    val f1 = catalog.getRowKey(0)
+    val f2 = getField(c)
+    f1 == f2
+  }
+
+  def isComposite(): Boolean = {
+    catalog.getRowKey.size > 1
+  }
+  def isColumn(c: String): Boolean = {
+    !catalog.getRowKey.map(_.colName).contains(c)
   }
 
   // Return the key that can be used as partition keys, which satisfying two conditions:
   // 1: it has to be the row key
   // 2: it has to be sequentially sorted without gap in the row key
   def getRowColumns(c: Seq[Field]): Seq[Field] = {
-    tableCatalog.getRowKey.zipWithIndex.filter { x =>
+    catalog.getRowKey.zipWithIndex.filter { x =>
       c.contains(x._1)
     }.zipWithIndex.filter { x =>
       x._1._2 == x._2
     }.map(_._1._1)
   }
 
-  def getProjections(requiredColumns: Array[String]): Seq[(Field, Int)] = {
-    requiredColumns.map(tableCatalog.sMap.getField(_)).zipWithIndex
+  def getIndexedProjections(requiredColumns: Array[String]): Seq[(Field, Int)] = {
+    requiredColumns.map(catalog.sMap.getField(_)).zipWithIndex
   }
   // Retrieve all columns we will return in the scanner
   def splitRowKeyColumns(requiredColumns: Array[String]): (Seq[Field], Seq[Field]) = {
-    val (l, r) = requiredColumns.map(tableCatalog.sMap.getField(_)).partition(_.cf == HBaseTableCatalog.rowKey)
-
+    val (l, r) = requiredColumns.map(catalog.sMap.getField(_)).partition(_.cf == HBaseTableCatalog.rowKey)
     (l, r)
   }
 
-  override val schema: StructType = tableCatalog.toDataType
+  override val schema: StructType = userSpecifiedschema.getOrElse(catalog.toDataType)
 
   def buildScan(requiredColumns: Array[String], filters: Array[Filter]): RDD[Row] = {
-    HBaseTableScan(this, requiredColumns, filters).execute()
+    new HBaseTableScanRDD(this, requiredColumns, filters)
   }
 
-  @transient lazy val partitions: Seq[HBasePartition] = {
-
-    val connection = ConnectionFactory.createConnection(HBaseConfiguration.create)
-    val r = connection.getRegionLocator(TableName.valueOf("t1"))
+  // Get all the partitions of the table
+  @transient lazy val regions: Seq[HBaseRegion] = {
+    val connection = ConnectionFactory.createConnection(hbaseConf)
+    val r = connection.getRegionLocator(TableName.valueOf(catalog.name))
     val keys = r.getStartEndKeys
     keys.getFirst.zip(keys.getSecond)
       .zipWithIndex
       .map (x =>
-        new HBasePartition(x._2,
+        HBaseRegion(x._2,
           Some(x._1._1),
           Some(x._1._2),
           Some(r.getRegionLocation(x._1._1).getHostname)))
-  }
-}
-
-
-// The definition of each column cell, which may be composite type
-case class Field(
-    cf: String,
-    col: String,
-    sType: Option[String] = None,
-    avroSchema: Option[String] = None,
-    val sedes: Option[Sedes[_]]= None) {
-  def isRowKey = cf == HBaseTableCatalog.rowKey
-  var start: Int = _
-  val schema: Option[Schema] = avroSchema.map { x =>
-    println(s"avro: $x")
-    val p = new Schema.Parser
-    p.parse(x)
-  }
-  def convertFunc: Option[Any => Any] = {
-    schema.map(SchemaConverters.createConverterToSQL(_))
-  }
-
-  def toDataType = {
-    sType.map(DataTypeParser.parse(_)).getOrElse{
-      schema.map{ x=>
-        SchemaConverters.toSqlType(x).dataType.asInstanceOf[StructType]
-      }.get
-    }
-  }
-  var length: Int = toDataType.defaultSize
-
-}
-// The row key definition, with each key refer to the col defined in Field, e.g.,
-// key1:key2:key3
-case class RowKey(keys: String) {
-  def getKeys = keys.split(":")
-  var fields: Seq[Field] = _
-  var varLength = false
-}
-// The map between the column presented to Spark and the HBase field
-case class SchemaMap(map: mutable.HashMap[String, Field]) {
-  def toFileds = map.map { case (name, field) =>
-    StructField(name, field.toDataType)
-  }.toSeq
-
-  def fields = map.values
-
-  def getField(name: String) = map(name)
-}
-// The definition of HBase and Relation relation schema
-case class TableCatalog(namespace: String, name: String, row: RowKey, sMap: SchemaMap) {
-  def toDataType = StructType(sMap.toFileds)
-  def getField(name: String) = sMap.getField(name)
-  def getRowKey: Seq[Field] = row.getKeys.map(getField(_))
-
-  def setupRowKeyMeta(rowKey: HBaseRawType) {
-    if(row.varLength) {
-      val f = row.getKeys.map(getField(_))
-      var start = 0
-      row.fields.zipWithIndex.foreach { f =>
-        f._1.start = start
-        if (f._1.toDataType == StringType) {
-          var pos = rowKey.indexOf(HBaseTableCatalog.delimiter, f._2)
-          if (pos == -1 || pos > rowKey.length) {
-            // this is at the last dimension
-            pos = rowKey.length
-          }
-          f._1.length = pos - start
-        }
-        start += f._1.length
-      }
-    }
-  }
-  def initRowKey = {
-    val fields = sMap.fields.filter(_.cf == HBaseTableCatalog.rowKey)
-    row.fields = row.getKeys.flatMap(n => fields.find(_.col == n))
-    if (row.fields.filter(_.toDataType == StringType).isEmpty) {
-      var start = 0
-      row.fields.foreach { f =>
-        f.start = start
-        start += f.length
-      }
-    } else {
-      row.varLength = true
-    }
-  }
-  initRowKey
-}
-
-object HBaseTableCatalog {
-  // The json string specifying hbase catalog information
-  val tableCatalog = "catalog"
-  // The row key with format key1:key2 specifying table row key
-  val rowKey = "rowkey"
-  // The key for hbase table whose value specify namespace and table name
-  val table = "table"
-  // The namespace of hbase table
-  val nameSpace = "namespace"
-  // The name of hbase table
-  val tableName = "name"
-  // The name of columns in hbase catalog
-  val columns = "columns"
-  val cf = "cf"
-  val col = "col"
-  val `type` = "type"
-  // the name of avro schema json string
-  val avro = "avro"
-  val delimiter: Byte = 0
-  val sedes = "sedes"
-  /**
-   * User provide table schema definition
-   * {"tablename":"name", "rowkey":"key1:key2",
-   * "columns":{"col1":{"cf":"cf1", "col":"col1", "type":"type1"},
-   * "col2":{"cf":"cf2", "col":"col2", "type":"type2"}}}
-   *  Note that any col in the rowKey, there has to be one corresponding col defined in columns
-   */
-  def apply(parameters: Map[String, String]): TableCatalog = {
-  //  println(jString)
-    val jString = parameters(tableCatalog)
-    val map= parse(jString).values.asInstanceOf[Map[String,_]]
-    val tableMeta = map.get(table).get.asInstanceOf[Map[String, _]]
-    val nSpace = tableMeta.get(nameSpace).getOrElse("default").asInstanceOf[String]
-    val tName = tableMeta.get(tableName).get.asInstanceOf[String]
-    val cIter = map.get(columns).get.asInstanceOf[Map[String, Map[String, String]]].toIterator
-    val schemaMap = mutable.HashMap.empty[String, Field]
-    cIter.foreach { case (name, column)=>
-      val sd = {
-        column.get(sedes).asInstanceOf[Option[String]].map( n =>
-          Class.forName(n).newInstance().asInstanceOf[Sedes[_]]
-        )
-      }
-      val sAvro = column.get(avro).map(parameters(_))
-      val f = Field(column.getOrElse(cf, rowKey),
-        column.get(col).get,
-        column.get(`type`),
-        sAvro, sd)
-      schemaMap.+= ((name, f))
-    }
-    val rKey = RowKey(map.get(rowKey).get.asInstanceOf[String])
-    TableCatalog(nSpace, tName, rKey, SchemaMap(schemaMap))
-  }
-
-  def main(args: Array[String]) {
-
-
-    val complex = s"""MAP<int, struct<varchar:string>>"""
-    val schema =
-      s"""{"namespace": "example.avro",
-         |   "type": "record",      "name": "User",
-         |    "fields": [      {"name": "name", "type": "string"},
-         |      {"name": "favorite_number",  "type": ["int", "null"]},
-         |        {"name": "favorite_color", "type": ["string", "null"]}      ]    }""".stripMargin
-
-    val catalog = s"""{
-            |"table":{"namespace":"default", "name":"htable"},
-            |"rowkey":"key1:key2",
-            |"columns":{
-              |"col1":{"cf":"rowkey", "col":"key1", "type":"string"},
-              |"col2":{"cf":"rowkey", "col":"key2", "type":"double"},
-              |"col3":{"cf":"cf1", "col":"col1", "avro":"schema1"},
-              |"col4":{"cf":"cf1", "col":"col2", "type":"binary"},
-              |"col5":{"cf":"cf1", "col":"col3", "type":"double", "sedes":"org.apache.spark.sql.execution.datasources.hbase.DoubleSedes"},
-              |"col6":{"cf":"cf1", "col":"col4", "type":"$complex"}
-            |}
-          |}""".stripMargin
-    val parameters = Map("schema1"->schema, tableCatalog->catalog)
-    val t = HBaseTableCatalog(parameters)
-    val d = t.toDataType
-    println(d)
-
-    val sqlContext: SQLContext = null
   }
 }
