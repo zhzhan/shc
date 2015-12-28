@@ -100,8 +100,14 @@ private[hbase] class HBaseTableScanRDD(
     relation.catalog.dynSetupRowKey(r)
     indexedFields.map { x =>
       if (x._1.isRowKey) {
-        if (x._1.start + x._1.length <= r.length) {
-          Utils.setRowCol(row, x, r, x._1.start, x._1.length)
+
+        val tmp = Math.min(x._1.length, (r.length - x._1.start))
+        if (log.isDebugEnabled) {
+          logDebug(s"start: ${x._1.start} length: ${x._1.length} " +
+            s"rowkeyLength ${r.length}  tmp: $tmp")
+        }
+        if (tmp > 0) {
+          Utils.setRowCol(row, x, r, x._1.start, tmp)
         } else {
           row.setNullAt(x._2)
         }
@@ -213,13 +219,15 @@ private[hbase] class HBaseTableScanRDD(
     }
     val size = sparkConf.getInt(SparkHBaseConf.CachingSize, SparkHBaseConf.defaultCachingSize)
     scan.setCaching(size)
-    if (filter.isDefined) {
-      scan.setFilter(filter.get)
-    }
+    filter.foreach(scan.setFilter(_))
     scan
   }
 
-  private def buildGets(tbr: TableResource, g: Array[ScanRange[Array[Byte]]], columns: Seq[Field]): Iterator[Result] = {
+  private def buildGets(
+      tbr: TableResource,
+      g: Array[ScanRange[Array[Byte]]],
+      columns: Seq[Field],
+      filter: Option[HFilter]): Iterator[Result] = {
     val size = sparkConf.getInt(SparkHBaseConf.BulkGetSize, SparkHBaseConf.defaultBulkGetSize)
     g.grouped(size).flatMap{ x =>
       val gets = new ArrayList[Get]()
@@ -228,6 +236,7 @@ private[hbase] class HBaseTableScanRDD(
         columns.foreach{ c =>
           g.addColumn(Bytes.toBytes(c.cf), Bytes.toBytes(c.col))
         }
+        filter.foreach(g.setFilter(_))
         gets.add(g)
       }
       val tmp = tbr.get(gets)
@@ -252,16 +261,17 @@ private[hbase] class HBaseTableScanRDD(
 
     context.addTaskCompletionListener(context => close())
     val tableResource = TableResource(relation)
+    val filter = TypedFilter.fromSerializedTypedFilter(partition.tf).filter
     val gIt: Iterator[Result] = {
       if (g.isEmpty) {
         Iterator.empty: Iterator[Result]
       } else {
-        buildGets(tableResource, g, columnFields)
+        buildGets(tableResource, g, columnFields, filter)
       }
     }
+
     val scans = s.map(x =>
-      buildScan(x.get(x.start), x.get(x.end), columnFields,
-        TypedFilter.fromSerializedTypedFilter(partition.tf).filter))
+      buildScan(x.get(x.start), x.get(x.end), columnFields, filter))
 
     val sIts = scans.par.map { scan =>
       val scanner = tableResource.getScanner(scan)
