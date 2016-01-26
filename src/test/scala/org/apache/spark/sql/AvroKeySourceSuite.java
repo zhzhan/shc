@@ -52,7 +52,7 @@ import java.util.Map;
 import static org.junit.Assert.assertEquals;
 
 public class AvroKeySourceSuite {
-
+/*
   private static final TableName TABLE_NAME = TableName.valueOf("TEST_TABLE");
   private static final String COLUMN_FAMILY = "COL_FAMILY";
   private static final String COLUMN_QUALIFIER = "COL_QUALIFIER";
@@ -192,4 +192,5 @@ public class AvroKeySourceSuite {
     }
     return baos.toByteArray();
   }
+*/
 }
