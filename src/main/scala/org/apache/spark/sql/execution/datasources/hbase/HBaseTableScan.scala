@@ -19,28 +19,17 @@ package org.apache.spark.sql.execution.datasources.hbase
 
 import java.util.ArrayList
 
+import org.apache.hadoop.hbase.CellUtil
+import org.apache.hadoop.hbase.client._
 import org.apache.hadoop.hbase.filter.{Filter => HFilter, FilterList => HFilterList}
 import org.apache.hadoop.hbase.util.Bytes
-import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.codegen.GeneratePredicate
-import org.apache.spark.sql.execution.datasources.hbase
-import org.apache.spark.sql.execution.datasources.hbase._
-import org.apache.spark.sql.sources.Filter
-import org.apache.spark.sql.sources.Filter
-import org.apache.spark.sql.types.{StructType, BinaryType, AtomicType}
-
-import scala.collection.JavaConverters._
-import scala.collection.JavaConversions._
-
-import org.apache.hadoop.hbase.{CellUtil, Cell, HBaseConfiguration}
-import org.apache.hadoop.hbase.client._
-import org.apache.hadoop.hbase.regionserver.RegionScanner
 import org.apache.spark._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.Row
-import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.sources.Filter
+import org.apache.spark.sql.execution.datasources.hbase
 import org.apache.spark.sql.execution.datasources.hbase.HBaseResources._
+import org.apache.spark.sql.sources.Filter
+import org.apache.spark.sql.types.{StringType, StructType}
 
 import scala.collection.mutable
 
@@ -60,7 +49,7 @@ private[hbase] case class HBaseScanPartition(
 private[hbase] class HBaseTableScanRDD(
     relation: HBaseRelation,
     requiredColumns: Array[String],
-    filters: Array[Filter]) extends RDD[InternalRow](relation.sqlContext.sparkContext, Nil) with Logging  {
+    filters: Array[Filter]) extends RDD[Row](relation.sqlContext.sparkContext, Nil) with Logging  {
   val outputs = StructType(requiredColumns.map(relation.schema(_))).toAttributes
   val columnFields = relation.splitRowKeyColumns(requiredColumns)._2
   private def sparkConf = SparkEnv.get.conf
@@ -92,35 +81,54 @@ private[hbase] class HBaseTableScanRDD(
     ps.asInstanceOf[Array[Partition]]
   }
 
-  def buildRow(
-      indexedFields: Seq[(Field, Int)],
-      result: Result,
-      row: MutableRow) = {
-    val r = result.getRow
-    relation.catalog.dynSetupRowKey(r)
-    indexedFields.map { x =>
-      if (x._1.isRowKey) {
-
-        val tmp = Math.min(x._1.length, (r.length - x._1.start))
-        if (log.isDebugEnabled) {
-          logDebug(s"start: ${x._1.start} length: ${x._1.length} " +
-            s"rowkeyLength ${r.length}  tmp: $tmp")
-        }
-        if (tmp > 0) {
-          Utils.setRowCol(row, x, r, x._1.start, tmp)
-        } else {
-          row.setNullAt(x._2)
-        }
+  /**
+   * Takes a HBase Row object and parses all of the fields from it.
+   * This is independent of which fields were requested from the key
+   * Because we have all the data it's less complex to parse everything.
+   * @param keyFields all of the fields in the row key, ORDERED by their order in the row key.
+   */
+  def parseRowKey(row: Array[Byte], keyFields: Seq[Field]): Map[Field, Any] = {
+    keyFields.foldLeft((0, Seq[(Field, Any)]()))((state, field) => {
+      val idx = state._1
+      val parsed = state._2
+      if (field.length != -1) {
+        val value = Utils.hbaseFieldToScalaType(field, row, idx, field.length)
+        // Return the new index and appended value
+        (idx + field.length, parsed ++ Seq((field, value)))
       } else {
-        val kv = result.getColumnLatestCell(Bytes.toBytes(x._1.cf), Bytes.toBytes(x._1.col))
-        if (kv == null || kv.getValueLength == 0) {
-          row.setNullAt(x._2)
-        } else {
-          val v = CellUtil.cloneValue(kv)
-          Utils.setRowCol(row, x, v, 0, v.length)
+        field.dt match {
+          case StringType =>
+            val pos = row.indexOf(HBaseTableCatalog.delimiter, idx)
+            if (pos == -1 || pos > row.length) {
+              // this is at the last dimension
+              val value = Utils.hbaseFieldToScalaType(field, row, idx, row.length)
+              (row.length + 1, parsed ++ Seq((field, value)))
+            } else {
+              val value = Utils.hbaseFieldToScalaType(field, row, idx, pos - idx)
+              (pos, parsed ++ Seq((field, value)))
+            }
+          // We don't know the length, assume it extend to the end of the rowkey.
+          case _ => (row.length + 1, parsed ++ Seq((field, Utils.hbaseFieldToScalaType(field, row, idx, row.length))))
         }
       }
-    }
+    })._2.toMap
+  }
+
+  def buildRow(fields: Seq[Field], result: Result): Row = {
+    val r = result.getRow
+    val keySeq = parseRowKey(r, relation.catalog.getRowKey)
+    val valueSeq = fields.filter(!_.isRowKey).map { x =>
+      val kv = result.getColumnLatestCell(Bytes.toBytes(x.cf), Bytes.toBytes(x.col))
+      if (kv == null || kv.getValueLength == 0) {
+        (x, null)
+      } else {
+        val v = CellUtil.cloneValue(kv)
+        (x, Utils.hbaseFieldToScalaType(x, v, 0, v.length))
+      }
+    }.toMap
+    val unioned = keySeq ++ valueSeq
+    // Return the row ordered by the requested order
+    Row.fromSeq(fields.map(unioned.get(_).getOrElse(null)))
   }
 
   private def toResultIterator(result: GetResource): Iterator[Result] = {
@@ -175,20 +183,18 @@ private[hbase] class HBaseTableScanRDD(
   }
 
   private def toRowIterator(
-      it: Iterator[Result]): Iterator[InternalRow] = {
+      it: Iterator[Result]): Iterator[Row] = {
 
-    val iterator = new Iterator[InternalRow] {
-      val row = new SpecificMutableRow(outputs.map(_.dataType))
-      val indexedFields = relation.getIndexedProjections(requiredColumns)
+    val iterator = new Iterator[Row] {
+      val indexedFields = relation.getIndexedProjections(requiredColumns).map(_._1)
 
       override def hasNext: Boolean = {
         it.hasNext
       }
 
-      override def next(): InternalRow = {
+      override def next(): Row = {
         val r = it.next()
-        buildRow(indexedFields, r, row)
-        row
+        buildRow(indexedFields, r)
       }
     }
     iterator
@@ -253,7 +259,7 @@ private[hbase] class HBaseTableScanRDD(
     rddResources.release()
   }
 
-  override def compute(split: Partition, context: TaskContext): Iterator[InternalRow] = {
+  override def compute(split: Partition, context: TaskContext): Iterator[Row] = {
     val ord = hbase.ord//implicitly[Ordering[HBaseType]]
     val partition = split.asInstanceOf[HBaseScanPartition]
     // remove the inclusive upperbound

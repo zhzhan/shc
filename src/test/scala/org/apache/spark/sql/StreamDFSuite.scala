@@ -145,6 +145,7 @@ class StreamDFSuite extends SHC with Logging {
       }.asInstanceOf[RDD[Row]]
       // create DF from stream and persist to table based on timestamp to achieve exactly once semantics
       val newDF = sqlContext.createDataFrame(collected, s)
+      newDF.cache()
       newDF.write.options(
         Map(HBaseTableCatalog.tableCatalog -> catalog))
         .format("org.apache.spark.sql.execution.datasources.hbase")

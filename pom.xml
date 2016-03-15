@@ -36,7 +36,7 @@
   <properties>
     <sbt.project.name>hbase</sbt.project.name>
     <project.version>1.4.1</project.version>
-    <spark.version>1.5.2</spark.version>
+    <spark.version>1.6.0</spark.version>
     <hadoop.version>2.6.0</hadoop.version>
     <hbase.version>1.1.1</hbase.version>
 
@@ -212,17 +212,6 @@
       <groupId>org.apache.spark</groupId>
       <artifactId>spark-sql_${scala.binary.version}</artifactId>
       <version>${spark.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.spark</groupId>
-      <artifactId>spark-streaming-kafka_${scala.binary.version}</artifactId>
-      <version>${spark.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.spark</groupId>
-      <artifactId>spark-streaming_${scala.binary.version}</artifactId>
-      <version>${spark.version}</version>
-      <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>jline</groupId>
@@ -1087,6 +1076,7 @@
             <spark.ui.showConsoleProgress>false</spark.ui.showConsoleProgress>
             <spark.driver.allowMultipleContexts>true</spark.driver.allowMultipleContexts>
           </systemProperties>
+         <parallel>false</parallel>
         </configuration>
         <executions>
           <execution>

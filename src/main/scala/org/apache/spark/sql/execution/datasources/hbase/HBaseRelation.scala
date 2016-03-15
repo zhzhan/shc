@@ -17,31 +17,23 @@
 
 package org.apache.spark.sql.execution.datasources.hbase
 
-import java.io.{IOException, ObjectInputStream, ObjectOutputStream, ByteArrayInputStream}
+import java.io.{IOException, ObjectInputStream, ObjectOutputStream}
 
-import org.apache.avro.Schema
-import org.apache.avro.generic.{GenericDatumWriter, GenericDatumReader, GenericRecord}
-import org.apache.avro.io._
-import org.apache.commons.io.output.ByteArrayOutputStream
 import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.hbase.client.{ConnectionFactory, Put}
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable
 import org.apache.hadoop.hbase.mapred.TableOutputFormat
-import org.apache.hadoop.hbase.mapreduce.TableInputFormat
-import org.apache.hadoop.hbase.{HColumnDescriptor, HTableDescriptor, TableName, HBaseConfiguration}
-import org.apache.hadoop.hbase.client.{HBaseAdmin, Put, ConnectionFactory, Table}
 import org.apache.hadoop.hbase.util.Bytes
+import org.apache.hadoop.hbase.{HBaseConfiguration, HColumnDescriptor, HTableDescriptor, TableName}
 import org.apache.hadoop.mapred.JobConf
 import org.apache.spark.Logging
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.types._
-import org.apache.spark.sql.{SaveMode, DataFrame, Row, SQLContext}
 import org.apache.spark.sql.sources._
-import org.json4s.JsonAST.JValue
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.{DataFrame, Row, SQLContext, SaveMode}
+import org.json4s.DefaultFormats
 import org.json4s.jackson.JsonMethods._
 
-import scala.collection.JavaConverters._
-import scala.collection.mutable
 import scala.util.control.NonFatal
 
 /**
@@ -79,7 +71,9 @@ case class HBaseRelation(
   val minStamp = parameters.get(HBaseRelation.MIN_STAMP).map(_.toLong)
   val maxStamp = parameters.get(HBaseRelation.MAX_STAMP).map(_.toLong)
   val maxVersions = parameters.get(HBaseRelation.MAX_VERSIONS).map(_.toInt)
-  override def needConversion: Boolean = false
+
+  @transient implicit val formats = DefaultFormats
+  val hBaseConfiguration = parameters.get(HBaseRelation.HBASE_CONFIGURATION).map(parse(_).extract[Map[String, String]])
 
   def createTable() {
     if (catalog.numReg > 3) {
@@ -166,7 +160,9 @@ case class HBaseRelation(
     if (testConf) {
       SparkHBaseConf.conf
     } else {
-      HBaseConfiguration.create
+      val conf = HBaseConfiguration.create
+      hBaseConfiguration.foreach(_.foreach(e => conf.set(e._1, e._2)))
+      conf
     }
   }
   val wrappedConf = sqlContext.sparkContext.broadcast(new SerializableConfiguration(hConf))
@@ -219,7 +215,7 @@ case class HBaseRelation(
   override val schema: StructType = userSpecifiedschema.getOrElse(catalog.toDataType)
 
   def buildScan(requiredColumns: Array[String], filters: Array[Filter]): RDD[Row] = {
-    new HBaseTableScanRDD(this, requiredColumns, filters).asInstanceOf[RDD[Row]]
+    new HBaseTableScanRDD(this, requiredColumns, filters)
   }
 }
 
@@ -250,5 +246,6 @@ object HBaseRelation {
   val MIN_STAMP = "minStamp"
   val MAX_STAMP = "maxStamp"
   val MAX_VERSIONS = "maxVersions"
+  val HBASE_CONFIGURATION = "hbaseConfiguration"
 
 }

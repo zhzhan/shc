@@ -18,8 +18,8 @@
 package org.apache.spark.sql
 
 import org.apache.spark.sql.execution.datasources.hbase.{HBaseRelation, HBaseTableCatalog}
-import org.apache.spark.{SparkContext, Logging}
 import org.apache.spark.sql.functions._
+import org.apache.spark.{Logging, SparkContext}
 
 case class HBaseRecord(
     col0: String,
@@ -45,11 +45,22 @@ object HBaseRecord {
       s"String$i: $t",
       i.toByte)
   }
+
+  def unpadded(i: Int, t: String): HBaseRecord = {
+    val s = s"""row${i}"""
+    HBaseRecord(s,
+      i % 2 == 0,
+      i.toDouble,
+      i.toFloat,
+      i,
+      i.toLong,
+      i.toShort,
+      s"String$i: $t",
+      i.toByte)
+  }
 }
 
 class DefaultSourceSuite extends SHC with Logging {
-  val sc = new SparkContext("local", "HBaseTest", conf)
-  val sqlContext = new SQLContext(sc)
 
   def withCatalog(cat: String): DataFrame = {
     sqlContext
@@ -61,7 +72,8 @@ class DefaultSourceSuite extends SHC with Logging {
 
   test("populate table") {
     //createTable(tableName, columnFamilies)
-    import sqlContext.implicits._
+    val sql = sqlContext
+    import sql.implicits._
 
     val data = (0 to 255).map { i =>
       HBaseRecord(i, "extra")
@@ -202,7 +214,8 @@ class DefaultSourceSuite extends SHC with Logging {
   }
 
   test("Timestamp semantics") {
-    import sqlContext.implicits._
+    val sql = sqlContext
+    import sql.implicits._
 
     // There's already some data in here from recently. Let's throw something in
     // from 1993 which we can include/exclude and add some data with the implicit (now) timestamp.
@@ -264,5 +277,30 @@ class DefaultSourceSuite extends SHC with Logging {
     // Test Getting middle stuff -- Pruned Scan, TimeRange
     val middleElement200 = middleRange.where(col("col0") === lit("row200")).select("col7").collect()(0)(0)
     assert(middleElement200 == "String200: extra")
+  }
+
+  test("Variable sized keys") {
+    val sql = sqlContext
+    import sql.implicits._
+    val data = (0 to 100).map { i =>
+      HBaseRecord.unpadded(i, "old")
+    }
+
+    // Delete the table because for this test we want to check the different number of values
+    htu.deleteTable(tableName)
+    createTable(tableName, columnFamilies)
+
+    sc.parallelize(data).toDF.write.options(
+      Map(HBaseTableCatalog.tableCatalog -> catalog, HBaseTableCatalog.tableName -> "5"))
+      .format("org.apache.spark.sql.execution.datasources.hbase")
+      .save()
+
+    val keys = withCatalog(catalog).select("col0").distinct().collect().map(a => a.getString(0))
+    // There was an issue with the keys being truncated during buildrow.
+    // This would result in only the number of keys as large as the first one
+    assert(keys.length == 101)
+    assert(keys.contains("row0"))
+    assert(keys.contains("row100"))
+    assert(keys.contains("row57"))
   }
 }

@@ -20,13 +20,12 @@ package org.apache.spark.sql
 import java.io.File
 
 import com.google.common.io.Files
-import org.apache.hadoop.hbase.{HColumnDescriptor, HTableDescriptor, TableName, HBaseTestingUtility}
-import org.apache.hadoop.hbase.client.{Scan, Put, ConnectionFactory, Table}
+import org.apache.hadoop.hbase.client.Table
 import org.apache.hadoop.hbase.util.Bytes
+import org.apache.hadoop.hbase.{HBaseTestingUtility, TableName}
 import org.apache.spark.sql.execution.datasources.hbase.SparkHBaseConf
-import org.apache.spark.{SparkContext, SparkConf, Logging}
+import org.apache.spark.{SparkContext, Logging, SparkConf}
 import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach, FunSuite}
-import scala.collection.JavaConverters._
 
 class SHC  extends FunSuite with BeforeAndAfterEach with BeforeAndAfterAll  with Logging {
   implicit class StringToColumn(val sc: StringContext) {
@@ -35,15 +34,17 @@ class SHC  extends FunSuite with BeforeAndAfterEach with BeforeAndAfterAll  with
     }
   }
 
+  var sc: SparkContext = null
+  var sqlContext: SQLContext = null
+  var df: DataFrame = null
 
-  private[spark] var htu = HBaseTestingUtility.createLocalHTU()
+  private[spark] var htu = new HBaseTestingUtility
   private[spark] def tableName = "table1"
 
   private[spark] def columnFamilies: Array[String] = Array.tabulate(9){ x=> s"cf$x"}
   var table: Table = null
   val conf = new SparkConf
   conf.set(SparkHBaseConf.testConf, "true")
-  SparkHBaseConf.conf = htu.getConfiguration
   // private[spark] var columnFamilyStr = Bytes.toString(columnFamily)
 
   def catalog = s"""{
@@ -65,27 +66,18 @@ class SHC  extends FunSuite with BeforeAndAfterEach with BeforeAndAfterAll  with
   override def beforeAll() {
     val tempDir: File = Files.createTempDir
     tempDir.deleteOnExit
-    htu.cleanupTestDir
-    htu.startMiniZKCluster
-    htu.startMiniHBaseCluster(1, 4)
+    htu.startMiniCluster
+    SparkHBaseConf.conf = htu.getConfiguration
     logInfo(" - minicluster started")
     println(" - minicluster started")
+    sc = new SparkContext("local", "HBaseTest", conf)
+    sqlContext = new SQLContext(sc)
 
   }
 
   override def afterAll() {
-    try {
-      table.close()
-      println("shutdown")
-      htu.deleteTable(TableName.valueOf(tableName))
-      logInfo("shuting down minicluster")
-      htu.shutdownMiniHBaseCluster
-      htu.shutdownMiniZKCluster
-      logInfo(" - minicluster shut down")
-      htu.cleanupTestDir
-    } catch {
-      case _: Throwable => logError("teardown error")
-    }
+    htu.shutdownMiniCluster()
+    sc.stop()
   }
 
   def createTable(name: String, cfs: Array[String]) {
@@ -94,7 +86,7 @@ class SHC  extends FunSuite with BeforeAndAfterEach with BeforeAndAfterAll  with
     try {
       htu.deleteTable(TableName.valueOf(tName))
     } catch {
-      case _: Throwable =>
+      case _ =>
         logInfo(" - no table " + name + " found")
     }
     htu.createMultiRegionTable(TableName.valueOf(tName), bcfs)
@@ -105,7 +97,7 @@ class SHC  extends FunSuite with BeforeAndAfterEach with BeforeAndAfterAll  with
     try {
       htu.deleteTable(TableName.valueOf(name))
     } catch {
-      case _: Throwable =>
+      case _ =>
         logInfo(" - no table " + Bytes.toString(name) + " found")
     }
     htu.createMultiRegionTable(TableName.valueOf(name), cfs)

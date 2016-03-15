@@ -26,8 +26,6 @@ import java.util.HashMap
 import org.apache.avro.io._
 import org.apache.commons.io.output.ByteArrayOutputStream
 import org.apache.hadoop.hbase.util.Bytes
-import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.unsafe.types.UTF8String
 
 import scala.collection.JavaConversions._
 
@@ -136,7 +134,7 @@ object SchemaConverters {
   def createConverterToSQL(schema: Schema): Any => Any = {
     schema.getType match {
       // Avro strings are in Utf8, so we have to call toString on them
-      case STRING | ENUM => (item: Any) => if (item == null) null else UTF8String.fromString(item.toString)
+      case STRING | ENUM => (item: Any) => if (item == null) null else item.toString
       case INT | BOOLEAN | DOUBLE | FLOAT | LONG => identity
       // Byte arrays are reused by avro, so we have to make a copy of them.
       case FIXED => (item: Any) => if (item == null) {
@@ -164,7 +162,7 @@ object SchemaConverters {
             converted(idx) = fieldConverters.apply(idx)(record.get(idx))
             idx += 1
           }
-          InternalRow.fromSeq(converted.toSeq)
+          Row.fromSeq(converted.toSeq)
         }
       case ARRAY =>
         val elementConverter = createConverterToSQL(schema.getElementType)
@@ -323,14 +321,7 @@ object SchemaConverters {
         case bytes: Array[Byte] => ByteBuffer.wrap(bytes)
       }
       case ByteType | ShortType | IntegerType | LongType |
-           FloatType | DoubleType | BooleanType => identity
-      case StringType =>
-        // TODO: When we create the record, we should convert them to UTF8String to avoid following hack
-        (item: Any) => try {
-          if (item == null) null else item.asInstanceOf[UTF8String].toString
-        }catch {
-          case _: Throwable => item
-        }
+           FloatType | DoubleType | StringType | BooleanType => identity
       case _: DecimalType => (item: Any) => if (item == null) null else item.toString
       case TimestampType => (item: Any) =>
         if (item == null) null else item.asInstanceOf[Timestamp].getTime
@@ -377,14 +368,8 @@ object SchemaConverters {
             val record = new Record(schema)
             val convertersIterator = fieldConverters.iterator
             val fieldNamesIterator = dataType.asInstanceOf[StructType].fieldNames.iterator
-            val rowIterator = {
-              // Row may be internal row, created from data source, or row created (write to sink)
-              try {
-                item.asInstanceOf[InternalRow].toSeq(structType).iterator
-              } catch {
-                case _: Throwable => item.asInstanceOf[Row].toSeq.iterator
-              }
-            }
+            val rowIterator = item.asInstanceOf[Row].toSeq.iterator
+
             while (convertersIterator.hasNext) {
               val converter = convertersIterator.next()
               record.put(fieldNamesIterator.next(), converter(rowIterator.next()))
@@ -407,7 +392,7 @@ object AvroSedes {
       case FLOAT => Bytes.toBytes(input.asInstanceOf[Float])
       case INT => Bytes.toBytes(input.asInstanceOf[Int])
       case LONG => Bytes.toBytes(input.asInstanceOf[Long])
-      case STRING => Bytes.toBytes(input.asInstanceOf[UTF8String].toString)
+      case STRING => Bytes.toBytes(input.asInstanceOf[String])
       case RECORD =>
         val gr = input.asInstanceOf[GenericRecord]
         val writer2 = new GenericDatumWriter[GenericRecord](schema)
