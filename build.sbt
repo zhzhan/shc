@@ -22,7 +22,7 @@ testHadoopVersion := sys.props.getOrElse("hadoop.testVersion", "2.2.0")
 
 spAppendScalaVersion := true
 
-spIncludeMaven := true
+spIncludeMaven := false 
 
 spIgnoreProvided := true
 
