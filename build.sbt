@@ -1,14 +1,16 @@
 // Your sbt build file. Guides on how to write one can be found at
 // http://www.scala-sbt.org/0.13/docs/index.html
-name := "spark-hbase-connector"
+name := "shc"
 
-organization := "com.hortonworks"
+version := "0.1-SNAPSHOT"
+
+organization := "zhzhan"
 
 scalaVersion := "2.10.4"
 
 sparkVersion := "1.6.0"
 
-spName := "Hortonworks/hbase-spark-connector"
+spName := "zhzhan/shc"
 
 val testSparkVersion = settingKey[String]("The version of Spark to test against.")
 
@@ -30,6 +32,8 @@ version := "0.0.1"
 // All Spark Packages need a license
 licenses := Seq("Apache-2.0" -> url("http://opensource.org/licenses/Apache-2.0"))
 
+credentials += Credentials(Path.userHome / ".ivy2" / ".sbtcredentials") // A file containing credentials
+
 unmanagedSourceDirectories in Compile <<= baseDirectory(base =>
   (base / "src" / "main" / "scala") :: Nil
 )
@@ -46,6 +50,20 @@ libraryDependencies ++= Seq(
   "org.apache.avro" % "avro" % "1.7.6", 
   "org.scalatest" %% "scalatest" % "2.2.1" % "test"
 )
+
+pomExtra :=
+  <url>http://www.nerdammer.it</url>
+    <scm>
+      <url>git@github.com:zhzhan/shc</url>
+      <connection>scm:git:git@github.com:zhzhan/shc.git</connection>
+    </scm>
+    <developers>
+      <developer>
+        <id>nibbio84</id>
+        <name>Nicola Ferraro</name>
+        <url>http://www.nerdammer.it</url>
+      </developer>
+    </developers>
 
 // uncomment and change the value below to change the directory where your zip artifact will be created
 // spDistDirectory := target.value
