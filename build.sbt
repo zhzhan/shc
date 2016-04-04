@@ -2,13 +2,13 @@
 // http://www.scala-sbt.org/0.13/docs/index.html
 name := "shc"
 
-version := "0.1-1.6.0-SNAPSHOT"
+version := "0.1-1.6.1-SNAPSHOT"
 
 organization := "zhzhan"
 
 scalaVersion := "2.10.4"
 
-sparkVersion := "1.6.0"
+sparkVersion := "1.6.1"
 
 spName := "zhzhan/shc"
 
@@ -27,12 +27,11 @@ spIncludeMaven := false
 spIgnoreProvided := true
 
 // Don't forget to set the version
-version := "0.0.1"
+version := "0.0.1-1.6.1"
 
 // All Spark Packages need a license
 licenses := Seq("Apache-2.0" -> url("http://opensource.org/licenses/Apache-2.0"))
 
-credentials += Credentials(Path.userHome / ".ivy2" / ".sbtcredentials") // A file containing credentials
 
 unmanagedSourceDirectories in Compile <<= baseDirectory(base =>
   (base / "src" / "main" / "scala") :: Nil
