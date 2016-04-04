@@ -7,3 +7,5 @@ resolvers ++= Seq(
 )
 
 addSbtPlugin("org.spark-packages" %% "sbt-spark-package" % "0.2.3")
+
+addSbtPlugin("net.virtual-void" %% "sbt-dependency-graph" % "0.8.2")

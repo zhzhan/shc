@@ -2,7 +2,7 @@
 // http://www.scala-sbt.org/0.13/docs/index.html
 name := "shc"
 
-version := "0.1-SNAPSHOT"
+version := "0.1-1.6.0-SNAPSHOT"
 
 organization := "zhzhan"
 
@@ -44,7 +44,7 @@ sparkComponents ++= Seq("core", "catalyst", "sql", "mllib")
 
 libraryDependencies ++= Seq(
   "org.scala-lang" % "scala-library" % "2.10.4", 
-  "org.apache.hbase" % "hbase-server" % "1.1.0" exclude("asm", "asm") exclude("org.jboss.netty", "netty") exclude("io.netty", "netty") exclude("commons-logging", "commons-logging") exclude("org.jruby","jruby-complete"),
+  "org.apache.hbase" % "hbase-server" % "1.1.0" exclude("asm", "asm") exclude("org.jboss.netty", "netty") exclude("io.netty", "netty-all") exclude("io.netty", "netty") exclude("commons-logging", "commons-logging") exclude("org.jruby","jruby-complete"),
   "org.apache.hbase" % "hbase-common" % "1.1.0" exclude("asm", "asm") exclude("org.jboss.netty", "netty") exclude("io.netty", "netty") exclude("commons-logging", "commons-logging") exclude("org.jruby","jruby-complete"),
 //  "org.apache.hbase" % "hbase-testing-util" % "1.2.0" % "test",
   "org.apache.avro" % "avro" % "1.7.6", 
@@ -52,16 +52,14 @@ libraryDependencies ++= Seq(
 )
 
 pomExtra :=
-  <url>http://www.nerdammer.it</url>
     <scm>
       <url>git@github.com:zhzhan/shc</url>
       <connection>scm:git:git@github.com:zhzhan/shc.git</connection>
     </scm>
     <developers>
       <developer>
-        <id>nibbio84</id>
-        <name>Nicola Ferraro</name>
-        <url>http://www.nerdammer.it</url>
+        <id>zhzhan</id>
+        <name>Zhan Zhang</name>
       </developer>
     </developers>
 
