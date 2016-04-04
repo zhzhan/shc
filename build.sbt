@@ -27,7 +27,7 @@ spIncludeMaven := false
 spIgnoreProvided := true
 
 // Don't forget to set the version
-version := "0.0.1-1.6.1"
+version := "0.0.11-1.6.1"
 
 // All Spark Packages need a license
 licenses := Seq("Apache-2.0" -> url("http://opensource.org/licenses/Apache-2.0"))
@@ -45,6 +45,7 @@ libraryDependencies ++= Seq(
   "org.scala-lang" % "scala-library" % "2.10.4", 
   "org.apache.hbase" % "hbase-server" % "1.1.0" exclude("asm", "asm") exclude("org.jboss.netty", "netty") exclude("io.netty", "netty-all") exclude("io.netty", "netty") exclude("commons-logging", "commons-logging") exclude("org.jruby","jruby-complete"),
   "org.apache.hbase" % "hbase-common" % "1.1.0" exclude("asm", "asm") exclude("org.jboss.netty", "netty") exclude("io.netty", "netty") exclude("commons-logging", "commons-logging") exclude("org.jruby","jruby-complete"),
+  "org.apache.hbase" % "hbase-client" % "1.1.0" exclude("asm", "asm") exclude("org.jboss.netty", "netty") exclude("io.netty", "netty") exclude("commons-logging", "commons-logging") exclude("org.jruby","jruby-complete"),
 //  "org.apache.hbase" % "hbase-testing-util" % "1.2.0" % "test",
   "org.apache.avro" % "avro" % "1.7.6", 
   "org.scalatest" %% "scalatest" % "2.2.1" % "test"
